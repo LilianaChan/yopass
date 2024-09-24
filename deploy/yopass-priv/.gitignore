@@ -1,0 +1,26 @@
+vendor
+coverage
+website/node_modules
+
+# production
+website/build
+
+# misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.netlify
+
+deploy/app-engine/public
+deploy/aws-lambda/node_modules
+deploy/aws-lambda/main
+deploy/aws-lambda/.serverless
+
+website/cypress/videos
+website/cypress/screenshots

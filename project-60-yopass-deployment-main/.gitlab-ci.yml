@@ -1,0 +1,119 @@
+---
+image:
+  name: docker:latest
+
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Security/Container-Scanning.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
+variables:
+  REGION: eu-west-1
+  CONTAINER: yopass 
+  ECR_REPO: efmg
+
+stages:
+    - test
+    - Build
+    - Scan
+    - Push
+
+default:
+  tags:
+    - dmz-runner
+
+container_scanning:
+  stage: Scan
+  tags:
+    - dmz-runner
+  inherit:
+    default: false
+  before_script:
+    - sudo apt update && sudo apt install jq -y
+  script: 
+    - gtcs scan
+    - result=$(cat gl-container-scanning-report.json | jq -r '.vulnerabilities[].id')
+    - if [ ! -z "${result}" ]; then exit 1; fi # check if there is vulnerability...
+  variables:
+    CS_IMAGE: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    GIT_STRATEGY: fetch
+    CS_DOCKERFILE_PATH: $CI_APPLICATION_REPOSITORY
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+  allow_failure: true
+
+secret_detection:
+  before_script:
+    - apk add jq
+  script:
+    - /analyzer run
+    - result=$(cat gl-secret-detection-report.json | jq -r '.vulnerabilities[].id')
+    - if [ ! -z "${result}" ]; then exit 137; fi # check if there is vulnerability...
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+  artifacts:
+    reports:
+      sast: gl-secret-detection-report.json
+
+docker-build:
+  # Use the official docker image.
+  image: docker:latest
+  stage: Build
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  script:
+    - cd deploy/yopass-priv && pwd && ls -la
+    - docker build -t "$CI_REGISTRY_IMAGE:${CI_COMMIT_SHA}" .
+  # Run this job in a branch where a Dockerfile exists
+ # rules:
+ #   - if: $CI_COMMIT_BRANCH
+   #   changes:
+   #     - Dockerfile
+
+docker-push:
+  # Use the official docker image.
+  image: docker:latest
+  stage: Push
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+  # Default branch leaves tag empty (= latest tag)
+  # All other branches are tagged with the escaped branch name (commit ref slug)
+  script:
+    - |
+      if [[ "$CI_COMMIT_BRANCH" == "$CI_DEFAULT_BRANCH" ]]; then
+        tag=""
+        echo "Running on default branch '$CI_DEFAULT_BRANCH': tag = 'latest'"
+      else
+        tag=":$CI_COMMIT_REF_SLUG"
+        echo "Running on branch '$CI_COMMIT_BRANCH': tag = $tag"
+      fi
+    - docker tag "$CI_REGISTRY_IMAGE:${CI_COMMIT_SHA}" "$CI_REGISTRY_IMAGE${tag}"
+    - docker push "$CI_REGISTRY_IMAGE${tag}" 
+  # Run this job in a branch where a Dockerfile exists
+ # rules:
+  #  - if: $CI_COMMIT_BRANCH == "main"
+  #    changes:
+    #    - Dockerfile
+
+ecr: 
+  image: docker:latest
+  variables:
+    GIT_STRATEGY: none
+  stage: Push
+  before_script:
+    - apk add aws-cli
+    - USER_ID=$(aws sts get-caller-identity --query Account --output text)
+    - REGISTRY_URL="$USER_ID.dkr.ecr.$REGION.amazonaws.com"
+  script:
+    - echo "Pushing image..."
+    - aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $REGISTRY_URL
+    - docker tag $CI_REGISTRY_IMAGE:latest $REGISTRY_URL/$ECR_REPO:$CONTAINER
+    - docker push $REGISTRY_URL/$ECR_REPO:$CONTAINER
+  rules:
+   - if: $CI_COMMIT_BRANCH == "main"
+
+  needs: [docker-push]
